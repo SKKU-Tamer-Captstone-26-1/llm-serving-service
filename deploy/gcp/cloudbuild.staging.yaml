@@ -1,0 +1,101 @@
+# Builds the TGI image and deploys a private Cloud Run GPU staging service.
+steps:
+  - id: build-image
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --platform
+      - linux/amd64
+      - --tag
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE_NAME}:${SHORT_SHA}
+      - .
+
+  - id: push-image
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE_NAME}:${SHORT_SHA}
+
+  - id: deploy-cloud-run-gpu
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        IMAGE_URI="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE_NAME}:${SHORT_SHA}"
+        AUTH_FLAG="--no-allow-unauthenticated"
+        if [[ "${_ALLOW_UNAUTHENTICATED}" == "true" ]]; then
+          AUTH_FLAG="--allow-unauthenticated"
+        fi
+
+        ENV_VARS="MODEL_ID=${_MODEL_ID},HOSTNAME=0.0.0.0,NUM_SHARD=${_NUM_SHARD},MAX_INPUT_TOKENS=${_MAX_INPUT_TOKENS},MAX_TOTAL_TOKENS=${_MAX_TOTAL_TOKENS},MAX_BATCH_PREFILL_TOKENS=${_MAX_BATCH_PREFILL_TOKENS},MAX_CONCURRENT_REQUESTS=${_MAX_CONCURRENT_REQUESTS},DTYPE=${_DTYPE},TRUST_REMOTE_CODE=${_TRUST_REMOTE_CODE},USAGE_STATS=off"
+        if [[ -n "${_REVISION}" ]]; then
+          ENV_VARS="${ENV_VARS},REVISION=${_REVISION}"
+        fi
+        if [[ -n "${_QUANTIZE}" ]]; then
+          ENV_VARS="${ENV_VARS},QUANTIZE=${_QUANTIZE}"
+        fi
+
+        DEPLOY_ARGS=(
+          run deploy "${_SERVICE_NAME}"
+          --project "${PROJECT_ID}"
+          --region "${_REGION}"
+          --platform managed
+          --image "${IMAGE_URI}"
+          --service-account "${_SERVICE_ACCOUNT}"
+          --execution-environment gen2
+          --port 8080
+          --cpu "${_CPU}"
+          --memory "${_MEMORY}"
+          --gpu 1
+          --gpu-type "${_GPU_TYPE}"
+          --no-cpu-throttling
+          --no-gpu-zonal-redundancy
+          --concurrency "${_CONCURRENCY}"
+          --timeout "${_TIMEOUT}s"
+          --min-instances "${_MIN_INSTANCES}"
+          --max-instances "${_MAX_INSTANCES}"
+          --startup-probe tcpSocket.port=8080,periodSeconds=10,timeoutSeconds=1,failureThreshold=180
+          --set-env-vars "${ENV_VARS}"
+          --labels service=llm-serving-service,environment=staging,runtime=tgi
+          "${AUTH_FLAG}"
+        )
+
+        HF_SECRET_REF="${_HF_TOKEN_SECRET_VERSION}"
+        if [[ -n "${HF_SECRET_REF}" && "${HF_SECRET_REF}" != "REPLACE_WITH_PINNED_SECRET_VERSION" ]]; then
+          DEPLOY_ARGS+=(--set-secrets "HF_TOKEN=${HF_SECRET_REF}")
+        fi
+
+        gcloud "${DEPLOY_ARGS[@]}"
+
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE_NAME}:${SHORT_SHA}
+
+substitutions:
+  _REGION: asia-southeast1
+  _REPOSITORY: ontheblock-llm
+  _SERVICE_NAME: llm-serving-service-staging
+  _SERVICE_ACCOUNT: llm-serving-staging@on-the-block-2026.iam.gserviceaccount.com
+  _MODEL_ID: Qwen/Qwen2.5-7B-Instruct
+  _REVISION: ""
+  _MAX_INPUT_TOKENS: "2048"
+  _MAX_TOTAL_TOKENS: "3072"
+  _MAX_BATCH_PREFILL_TOKENS: "4096"
+  _MAX_CONCURRENT_REQUESTS: "4"
+  _NUM_SHARD: "1"
+  _DTYPE: float16
+  _QUANTIZE: ""
+  _TRUST_REMOTE_CODE: "false"
+  _HF_TOKEN_SECRET_VERSION: REPLACE_WITH_PINNED_SECRET_VERSION
+  _ALLOW_UNAUTHENTICATED: "false"
+  _GPU_TYPE: nvidia-l4
+  _CPU: "8"
+  _MEMORY: 32Gi
+  _CONCURRENCY: "1"
+  _MAX_INSTANCES: "1"
+  _MIN_INSTANCES: "0"
+  _TIMEOUT: "900"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  substitutionOption: ALLOW_LOOSE
